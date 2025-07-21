@@ -15,7 +15,7 @@ import time
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
 OLLAMA_MODEL = "llama3"
-TELEGRAM_TOKEN = "7560768347:AAG8gcMmsICY-6amjeETx9fmkjNlLr6Zjkw"
+TELEGRAM_TOKEN = "ADD_TOKEN"
 
 SECTIONS = {
     "popular": "/popular",
