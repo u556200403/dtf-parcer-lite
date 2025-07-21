@@ -12,12 +12,14 @@ from telegram.ext import (
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 import time
+import urllib.parse
+from datetime import datetime
 
-OLLAMA_URL = "http://localhost:11434/api/generate"
-OLLAMA_MODEL = "llama3"
-TELEGRAM_TOKEN = "YOUR_TOKEN"
+API_ENDPOINT = "http://127.0.0.1:11434/api/generate"
+MODEL_NAME = "llama3"
+BOT_TOKEN = "YOUR_TOKEN"
 
-SECTIONS = {
+CATEGORIES = {
     "popular": "/popular",
     "cinema": "/cinema",
     "games": "/games",
@@ -25,157 +27,230 @@ SECTIONS = {
     "gamedev": "/gamedev"
 }
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
+async def init_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    menu = [
         [InlineKeyboardButton("Популярное", callback_data="popular")],
         [InlineKeyboardButton("Кино и сериалы", callback_data="cinema")],
         [InlineKeyboardButton("Игры", callback_data="games")],
         [InlineKeyboardButton("Музыка", callback_data="music")],
-        [InlineKeyboardButton("Gamedev", callback_data="gamedev")]
+        [InlineKeyboardButton("Gamedev", callback_data="gamedev")],
+        [InlineKeyboardButton("Самые популярные посты по теме", callback_data="site_search")]
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("Выберите раздел:", reply_markup=reply_markup)
+    await update.message.reply_text("Выберите категорию:", reply_markup=InlineKeyboardMarkup(menu))
 
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def process_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    section = query.data
-    if section in SECTIONS:
-        await query.edit_message_text(f"Выбран раздел: {section}. Теперь введите тему для поиска:")
-        context.user_data["current_section"] = section
+    category = query.data
+    if category in CATEGORIES:
+        await query.edit_message_text(f"Выбрана категория: {category}. Введите тему:")
+        context.user_data["current_category"] = category
+    elif category == "site_search":
+        await query.edit_message_text("Введите поисковый запрос:")
+        context.user_data["search_type"] = "site"
     else:
-        await query.edit_message_text("Неизвестный раздел")
+        await query.edit_message_text("Ошибка")
 
-async def handle_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if "current_section" not in context.user_data:
-        await update.message.reply_text("Сначала выберите раздел с помощью команды /start")
+async def process_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if "current_category" not in context.user_data and "search_type" not in context.user_data:
+        await update.message.reply_text("Сначала выберите категорию")
         return
     
-    topic = update.message.text
-    section = context.user_data["current_section"]
+    search_query = update.message.text
     
-    await update.message.reply_text(f"Ищу новости по теме '{topic}' в разделе '{section}'...")
+    if "search_type" in context.user_data and context.user_data["search_type"] == "site":
+        await update.message.reply_text(f"Поиск: '{search_query}'...")
+        try:
+            results = perform_site_search(search_query)
+            
+            if not results:
+                await update.message.reply_text("Ничего не найдено")
+                return
+            
+            output = "Топ результатов:\n\n"
+            for i, (title, url, views) in enumerate(results[:20], 1):
+                output += f"{i}. [{title}]({url}) - 👁️ {views}\n"
+            
+            await update.message.reply_text(output, parse_mode="Markdown", disable_web_page_preview=True)
+            
+        except Exception as e:
+            await update.message.reply_text(f"Ошибка: {str(e)}")
+        finally:
+            if "search_type" in context.user_data:
+                del context.user_data["search_type"]
+    else:
+        category = context.user_data["current_category"]
+        await update.message.reply_text(f"Поиск: '{search_query}' в '{category}'...")
+        
+        try:
+            news_items = get_category_news(CATEGORIES[category])
+            
+            filtered = [n for n in news_items if search_query.lower() in n.lower()]
+            
+            if not filtered:
+                await update.message.reply_text("Ничего не найдено")
+                return
+            
+            summary = await generate_summary(filtered[:5], search_query)
+            await update.message.reply_text(summary, disable_web_page_preview=True)
+            
+        except Exception as e:
+            await update.message.reply_text(f"Ошибка: {str(e)}")
+
+def perform_site_search(query: str) -> list:
+    options = Options()
+    options.add_argument("--headless")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--window-size=1920x1080")
+    
+    driver = webdriver.Chrome(options=options)
+    encoded_query = urllib.parse.quote(query)
+    url = f"https://dtf.ru/discovery?q={encoded_query}"
     
     try:
-        all_news = scrape_dtf_news_with_scroll(SECTIONS[section])
+        driver.get(url)
+        time.sleep(3)
         
-        filtered = [
-            n for n in all_news 
-            if topic.lower() in n.lower()
-        ]
+        last_height = driver.execute_script("return document.body.scrollHeight")
+        for _ in range(3):
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(2)
+            new_height = driver.execute_script("return document.body.scrollHeight")
+            if new_height == last_height:
+                break
+            last_height = new_height
         
-        if not filtered:
-            await update.message.reply_text(
-                f"Не найдено новостей по теме '{topic}' в разделе '{section}'. Попробуйте другую тему."
-            )
-            return
+        soup = BeautifulSoup(driver.page_source, "html.parser")
+        items = []
         
-        summary = await summarize_with_ollama(filtered[:5], topic)
-        await update.message.reply_text(summary, disable_web_page_preview=True)
+        for item in soup.find_all("div", class_="content--short"):
+            title = item.find("div", class_="content-title")
+            if not title:
+                continue
+            title = title.get_text(strip=True)
+            
+            link = item.find("a", class_="content__link")
+            if not link or not link.get("href"):
+                continue
+            link = "https://dtf.ru" + link["href"]
+            
+            views = item.find("a", class_="comments-counter")
+            if views:
+                views = views.find("div", class_="content-footer-button__label")
+                if views:
+                    try:
+                        views = int(views.get_text(strip=True))
+                    except:
+                        views = 0
+                else:
+                    views = 0
+            else:
+                views = 0
+            
+            date = item.find("time")
+            if date and 'datetime' in date.attrs:
+                try:
+                    date_obj = datetime.strptime(date['datetime'], "%Y-%m-%dT%H:%M:%S.%fZ")
+                    date_ts = date_obj.timestamp()
+                except:
+                    date_ts = time.time()
+            else:
+                date_ts = time.time()
+            
+            current_ts = time.time()
+            hours_diff = (current_ts - date_ts) / 3600
+            freshness = max(0, 1 - (hours_diff / 24))
+            weight = views * (1 + freshness)
+            
+            items.append((title, link, views, date_ts, weight))
+        
+        items.sort(key=lambda x: x[4], reverse=True)
+        return [(t, l, v) for t, l, v, _, _ in items]
         
     except Exception as e:
-        await update.message.reply_text(f"Произошла ошибка: {str(e)}")
+        print(f"Ошибка: {e}")
+        return []
+    finally:
+        driver.quit()
 
-async def summarize_with_ollama(news_list: list[str], topic: str) -> str:
-    if not news_list:
-        return f"Не найдено новостей по теме '{topic}'."
+async def generate_summary(items: list, query: str) -> str:
+    if not items:
+        return f"Не найдено по запросу '{query}'."
     
-    prompt = (
-        f"Сделай краткую выжимку из следующих новостей по теме '{topic}'. "
-        "Если новости не совсем соответствуют теме, укажи это. "
-        "Отвечай на русском языке. Формат:\n"
-        "1. [Заголовок](ссылка) - краткое описание\n"
-        "2. ...\n\n"
-        "Новости:\n\n"
-    )
-    prompt += "\n\n".join(news_list)
+    prompt = f"Сделай краткую выжимку по теме '{query}'. Формат:\n1. [Заголовок](ссылка) - описание\n\nМатериалы:\n\n" + "\n\n".join(items)
 
     response = requests.post(
-        OLLAMA_URL,
+        API_ENDPOINT,
         json={
-            "model": OLLAMA_MODEL,
+            "model": MODEL_NAME,
             "prompt": prompt,
             "stream": False
         }
     )
 
     if response.ok:
-        result = response.json()
-        return result.get("response", "Не удалось получить ответ от модели.")
-    return "Ошибка при подключении к серверу."
+        return response.json().get("response", "Ошибка")
+    return "Ошибка соединения"
 
-def scrape_dtf_news_with_scroll(section_url: str) -> list[str]:
-    chrome_options = Options()
-    chrome_options.add_argument("--headless")
-    chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--window-size=1920x1080")
+def get_category_news(category_url: str) -> list:
+    options = Options()
+    options.add_argument("--headless")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--window-size=1920x1080")
     
-    driver = webdriver.Chrome(options=chrome_options)
-    url = f"https://dtf.ru{section_url}"
+    driver = webdriver.Chrome(options=options)
+    url = f"https://dtf.ru{category_url}"
     
     try:
         driver.get(url)
         time.sleep(2)
         
         last_height = driver.execute_script("return document.body.scrollHeight")
-        scroll_attempts = 0
-        max_scroll_attempts = 5
-        news_count = 0
-        
-        while scroll_attempts < max_scroll_attempts and news_count < 50:
+        for _ in range(5):
             driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
             time.sleep(2)
-            
             new_height = driver.execute_script("return document.body.scrollHeight")
             if new_height == last_height:
                 break
             last_height = new_height
-            scroll_attempts += 1
-            
-            soup = BeautifulSoup(driver.page_source, "html.parser")
-            news_count = len(soup.find_all("div", class_="content--short"))
         
         soup = BeautifulSoup(driver.page_source, "html.parser")
-        news_items = []
+        results = []
         
-        content_blocks = soup.find_all("div", class_="content--short", limit=50)
-        
-        for block in content_blocks:
-            title_block = block.find("div", class_="content-title")
-            if not title_block:
+        for item in soup.find_all("div", class_="content--short", limit=50):
+            title = item.find("div", class_="content-title")
+            if not title:
                 continue
-                
-            title = title_block.text.strip()
+            title = title.text.strip()
             
-            link_block = block.find("a", class_="content__link")
-            if not link_block or "href" not in link_block.attrs:
+            link = item.find("a", class_="content__link")
+            if not link or "href" not in link.attrs:
                 continue
-                
-            link = "https://dtf.ru" + link_block["href"]
+            link = "https://dtf.ru" + link["href"]
             
-            text_block = block.find("div", class_="block-text")
-            description = text_block.text.strip() if text_block else ""
+            text = item.find("div", class_="block-text")
+            text = text.text.strip() if text else ""
             
-            news_items.append(f"{title}\n{link}\n{description}")
+            results.append(f"{title}\n{link}\n{text}")
 
-        return news_items
+        return results
         
     except Exception as e:
-        print(f"Ошибка при загрузке данных: {e}")
+        print(f"Ошибка: {e}")
         return []
     finally:
         driver.quit()
 
-def main():
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+def start_bot():
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
     
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_topic))
+    app.add_handler(CommandHandler("start", init_bot))
+    app.add_handler(CallbackQueryHandler(process_callback))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_text))
     
-    print("Бот работает")
+    print("Бот активен")
     app.run_polling()
 
 if __name__ == "__main__":
-    main()
+    start_bot()
