@@ -1,0 +1,23 @@
+# Бот сбора статей по теме из разделов сайта DTF.ru
+
+Бот собирает новости с сайта [dtf.ru](https://dtf.ru/) и делает AI-выжимку по заданной теме через Ollama.
+
+## Возможности
+Команда `/start` выводит кнопки для выбора раздела, дальше нужно ввести искомую тему
+Использует локальный Ollama (например, LLaMA3).
+Ollama парсит сайт и выводит из последних 20 новостей новости со ссылками по заданной теме
+
+## Нужно установить
+
+Python 3.10+
+Ollama
+Созать телеграм токен через @BotFather и заполнить его в коде
+
+## Установка
+
+```bash
+git clone https://github.com/yourname/news-ai-bot
+cd news-ai-bot
+python -m venv venv
+.\venv\Scripts\activate
+pip install -r requirements.txt
